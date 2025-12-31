@@ -161,9 +161,10 @@ fn round_function(state: &[u64; WORDS], r: usize) -> [u64; WORDS] {
     let mut s = theta_diffusion(state);
     s = bit_permutation(&s);
     s = chi_non_linearity(&s);
-    add_round_constant(&mut s, ROUND_CONSTANTS[r]);
+    add_round_constant(&mut s, ROUND_CONSTANTS[r % RC_COUNT]);
     s
 }
+
 
 // =========================================================
 //   SQUEEZE
