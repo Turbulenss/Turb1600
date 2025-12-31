@@ -1,0 +1,13 @@
+[package]
+name = "turb1600"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Turbulenss"]
+
+[lib]
+name = "turb1600"
+crate-type = ["rlib"]
+
+[dependencies]
+hex = "0.4"
