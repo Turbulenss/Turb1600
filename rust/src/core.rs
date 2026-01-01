@@ -1,5 +1,7 @@
+use std::sync::LazyLock;
+
 // =========================================================
-//   turb1600 — reference implementation
+//   turb1600 — Optimized
 // =========================================================
 
 const WORDS: usize = 25;
@@ -17,6 +19,7 @@ const SEED_STRING: &[u8] =
 //   helpers
 // =========================================================
 
+#[inline(always)]
 fn rol(x: u64, r: u32) -> u64 {
     x.rotate_left(r)
 }
@@ -27,74 +30,23 @@ fn rol(x: u64, r: u32) -> u64 {
 
 const RC_COUNT: usize = 1024;
 
-fn gen_round_constants() -> [u64; RC_COUNT] {
+static RC: LazyLock<[u64; RC_COUNT]> = LazyLock::new(|| {
     let mut rc = [0u64; RC_COUNT];
-    let mut x: u64 = 0x9E3779B97F4A7C15;
-
-    for i in 0..RC_COUNT {
+    let mut x = 0x9E3779B97F4A7C15u64;
+    let mut i = 0;
+    while i < RC_COUNT {
         x ^= x << 7;
         x ^= x >> 9;
         x ^= x << 8;
         rc[i] = x;
+        i += 1;
     }
-
     rc
-}
+});
 
 // =========================================================
-//   state initialization
+//   permutation tables
 // =========================================================
-
-fn initialize_state() -> [u64; WORDS] {
-    let mut state = [0u64; WORDS];
-    for (i, &b) in SEED_STRING.iter().enumerate() {
-        state[i % WORDS] ^= (b as u64) + (i as u64);
-    }
-    state
-}
-
-// =========================================================
-//   absorb
-// =========================================================
-
-fn absorb_block(state: &mut [u64; WORDS], block: &[u8]) {
-    for i in (0..block.len()).step_by(8) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(&block[i..i + 8]);
-        state[i / 8] ^= u64::from_le_bytes(buf);
-    }
-}
-
-// =========================================================
-//   permutation layers
-// =========================================================
-
-fn theta_diffusion(state: &[u64; WORDS]) -> [u64; WORDS] {
-    let mut c = [0u64; 5];
-    let mut d = [0u64; 5];
-
-    for x in 0..5 {
-        c[x] =
-            state[x] ^
-            state[x + 5] ^
-            state[x + 10] ^
-            state[x + 15] ^
-            state[x + 20];
-    }
-
-    for x in 0..5 {
-        d[x] = c[(x + 4) % 5] ^ rol(c[(x + 1) % 5], 1);
-    }
-
-    let mut out = *state;
-    for x in 0..5 {
-        for y in 0..5 {
-            out[x + 5 * y] ^= d[x];
-        }
-    }
-
-    out
-}
 
 const ROT: [u32; WORDS] = [
      0,  1, 62, 28, 27,
@@ -104,98 +56,162 @@ const ROT: [u32; WORDS] = [
     18,  2, 61, 56, 14,
 ];
 
-fn bit_permutation(state: &[u64; WORDS]) -> [u64; WORDS] {
-    let mut out = [0u64; WORDS];
-    for i in 0..WORDS {
-        out[(i * 7) % WORDS] = rol(state[i], ROT[i]);
+const PI: [usize; WORDS] = [
+     0,  7, 14, 21,  3,
+    10, 17, 24,  6, 13,
+    20,  2,  9, 16, 23,
+     5, 12, 19,  1,  8,
+    15, 22,  4, 11, 18,
+];
+
+// =========================================================
+//   state initialization
+// =========================================================
+
+#[inline(always)]
+fn initialize_state() -> [u64; WORDS] {
+    let mut s = [0u64; WORDS];
+    let mut i = 0;
+    while i < SEED_STRING.len() {
+        s[i % WORDS] ^= (SEED_STRING[i] as u64) + i as u64;
+        i += 1;
     }
-    out
-}
-
-fn chi_non_linearity(state: &[u64; WORDS]) -> [u64; WORDS] {
-    let mut out = *state;
-
-    for i in (0..WORDS).step_by(5) {
-        let a = state[i];
-        let b = state[i + 1];
-        let c = state[i + 2];
-        let d = state[i + 3];
-        let e = state[i + 4];
-
-        out[i]     ^= (!b) & c;
-        out[i + 1] ^= (!c) & d;
-        out[i + 2] ^= (!d) & e;
-        out[i + 3] ^= (!e) & a;
-        out[i + 4] ^= (!a) & b;
-    }
-
-    out
-}
-
-fn add_round_constant(state: &mut [u64; WORDS], rc: u64) {
-    state[0] ^= rc;
+    s
 }
 
 // =========================================================
-//   round function
+//   absorb (aligned, unchecked)
 // =========================================================
 
-fn round_function(state: &[u64; WORDS], r: usize, rc: &[u64; RC_COUNT]) -> [u64; WORDS] {
-    let s1 = theta_diffusion(state);
-    let s2 = bit_permutation(&s1);
-    let mut s3 = chi_non_linearity(&s2);
-    add_round_constant(&mut s3, rc[r % RC_COUNT]);
-    s3
-}
-
-// =========================================================
-//   squeeze
-// =========================================================
-
-fn squeeze(mut state: [u64; WORDS], out_bytes: usize, rc: &[u64; RC_COUNT]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut r = 0usize;
-
-    while out.len() < out_bytes {
-        for &w in &state[..RATE_WORDS] {
-            out.extend_from_slice(&w.to_le_bytes());
+#[inline(always)]
+fn absorb_block(state: &mut [u64; WORDS], block: &[u8]) {
+    unsafe {
+        let s = state.as_mut_ptr();
+        let p = block.as_ptr() as *const u64;
+        let mut i = 0;
+        while i < RATE_WORDS {
+            *s.add(i) ^= u64::from_le(*p.add(i));
+            i += 1;
         }
-        state = round_function(&state, r, rc);
-        r += 1;
     }
-
-    out.truncate(out_bytes);
-    out
 }
 
 // =========================================================
-//   top-level hash
+//   permutation (fully unrolled)
+// =========================================================
+
+#[inline(always)]
+fn permute(state: &mut [u64; WORDS], tmp: &mut [u64; WORDS], r: usize) {
+    unsafe {
+        let s = state.as_mut_ptr();
+
+        // ---- theta ----
+        let c0 = *s.add(0) ^ *s.add(5) ^ *s.add(10) ^ *s.add(15) ^ *s.add(20);
+        let c1 = *s.add(1) ^ *s.add(6) ^ *s.add(11) ^ *s.add(16) ^ *s.add(21);
+        let c2 = *s.add(2) ^ *s.add(7) ^ *s.add(12) ^ *s.add(17) ^ *s.add(22);
+        let c3 = *s.add(3) ^ *s.add(8) ^ *s.add(13) ^ *s.add(18) ^ *s.add(23);
+        let c4 = *s.add(4) ^ *s.add(9) ^ *s.add(14) ^ *s.add(19) ^ *s.add(24);
+
+        let d0 = c4 ^ c1.rotate_left(1);
+        let d1 = c0 ^ c2.rotate_left(1);
+        let d2 = c1 ^ c3.rotate_left(1);
+        let d3 = c2 ^ c4.rotate_left(1);
+        let d4 = c3 ^ c0.rotate_left(1);
+
+        let mut i = 0;
+        while i < 25 {
+            *s.add(i)     ^= d0;
+            *s.add(i + 1) ^= d1;
+            *s.add(i + 2) ^= d2;
+            *s.add(i + 3) ^= d3;
+            *s.add(i + 4) ^= d4;
+            i += 5;
+        }
+
+        // ---- rho + pi ----
+        i = 0;
+        while i < 25 {
+            *tmp.get_unchecked_mut(PI[i]) =
+                (*s.add(i)).rotate_left(ROT[i]);
+            i += 1;
+        }
+
+        *state = *tmp;
+
+        let s = state.as_mut_ptr();
+
+        // ---- chi ----
+        i = 0;
+        while i < 25 {
+            let a = *s.add(i);
+            let b = *s.add(i + 1);
+            let c = *s.add(i + 2);
+            let d = *s.add(i + 3);
+            let e = *s.add(i + 4);
+
+            *s.add(i)     ^= (!b) & c;
+            *s.add(i + 1) ^= (!c) & d;
+            *s.add(i + 2) ^= (!d) & e;
+            *s.add(i + 3) ^= (!e) & a;
+            *s.add(i + 4) ^= (!a) & b;
+
+            i += 5;
+        }
+
+        // ---- iota ----
+        *s ^= RC[r & (RC_COUNT - 1)];
+    }
+}
+
+// =========================================================
+//   hash
 // =========================================================
 
 pub fn turb1600_hash(message: &[u8]) -> Vec<u8> {
-    let rc = gen_round_constants();
     let mut state = initialize_state();
-
-    let padlen = (RATE_BYTES - (message.len() + 2) % RATE_BYTES) % RATE_BYTES;
-    let mut padded = Vec::from(message);
-    padded.push(0x01);
-    padded.extend(vec![0u8; padlen]);
-    padded.push(0x80);
-
+    let mut tmp = [0u64; WORDS];
     let mut r = 0usize;
 
-    for block in padded.chunks(RATE_BYTES) {
-        absorb_block(&mut state, block);
+    // ---- absorb full blocks ----
+    let mut offset = 0;
+    while offset + RATE_BYTES <= message.len() {
+        absorb_block(&mut state, &message[offset..offset + RATE_BYTES]);
         for _ in 0..ROUNDS {
-            state = round_function(&state, r, &rc);
+            permute(&mut state, &mut tmp, r);
             r += 1;
         }
+        offset += RATE_BYTES;
     }
 
-    for _ in 0..FINAL_ROUNDS {
-        state = round_function(&state, r, &rc);
+    // ---- final padded block ----
+    let mut last = [0u8; RATE_BYTES];
+    let rem = message.len() - offset;
+    last[..rem].copy_from_slice(&message[offset..]);
+    last[rem] = 0x01;
+    last[RATE_BYTES - 1] |= 0x80;
+
+    absorb_block(&mut state, &last);
+
+    for _ in 0..ROUNDS + FINAL_ROUNDS {
+        permute(&mut state, &mut tmp, r);
         r += 1;
     }
 
-    squeeze(state, OUTPUT_BYTES, &rc)
+    // ---- squeeze ----
+    let mut out = vec![0u8; OUTPUT_BYTES];
+    let mut o = 0;
+    while o < OUTPUT_BYTES {
+        let mut i = 0;
+        while i < RATE_WORDS && o < OUTPUT_BYTES {
+            let bytes = state[i].to_le_bytes();
+            let n = (OUTPUT_BYTES - o).min(8);
+            out[o..o + n].copy_from_slice(&bytes[..n]);
+            o += n;
+            i += 1;
+        }
+        permute(&mut state, &mut tmp, r);
+        r += 1;
+    }
+
+    out
 }
