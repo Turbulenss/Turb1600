@@ -1,35 +1,28 @@
-use std::sync::LazyLock;
-
 // =========================================================
-//   turb1600
+//   turb1600 — reference implementation
 // =========================================================
 
-const MASK: u64 = 0xFFFF_FFFF_FFFF_FFFF;
-
-const WORDS: usize = 25;                // 1600-bit state
-const RATE_BYTES: usize = 136;           // 1088-bit rate
+const WORDS: usize = 25;
+const RATE_BYTES: usize = 136;
 const RATE_WORDS: usize = RATE_BYTES / 8;
 
 const ROUNDS: usize = 16;
 const FINAL_ROUNDS: usize = 4;
-const OUTPUT_BYTES: usize = 128;         // 1024-bit output
+const OUTPUT_BYTES: usize = 128;
 
 const SEED_STRING: &[u8] =
     b"turb1600 | sponge-hash | state=1600 | rate=1088 | capacity=512 | output=1024 | v1";
 
-
-
 // =========================================================
-//   U64 HELPERS
+//   helpers
 // =========================================================
 
-#[inline(always)]
 fn rol(x: u64, r: u32) -> u64 {
     x.rotate_left(r)
 }
 
 // =========================================================
-//   ROUND CONSTANTS
+//   round constants
 // =========================================================
 
 const RC_COUNT: usize = 1024;
@@ -39,19 +32,17 @@ fn gen_round_constants() -> [u64; RC_COUNT] {
     let mut x: u64 = 0x9E3779B97F4A7C15;
 
     for i in 0..RC_COUNT {
-        x ^= (x << 7) & MASK;
+        x ^= x << 7;
         x ^= x >> 9;
-        x ^= (x << 8) & MASK;
-        rc[i] = x & MASK;
+        x ^= x << 8;
+        rc[i] = x;
     }
+
     rc
 }
 
-static ROUND_CONSTANTS: LazyLock<[u64; RC_COUNT]> =
-    LazyLock::new(gen_round_constants);
-
 // =========================================================
-//   STATE INITIALIZATION
+//   state initialization
 // =========================================================
 
 fn initialize_state() -> [u64; WORDS] {
@@ -63,7 +54,7 @@ fn initialize_state() -> [u64; WORDS] {
 }
 
 // =========================================================
-//   ABSORB
+//   absorb
 // =========================================================
 
 fn absorb_block(state: &mut [u64; WORDS], block: &[u8]) {
@@ -75,7 +66,7 @@ fn absorb_block(state: &mut [u64; WORDS], block: &[u8]) {
 }
 
 // =========================================================
-//   ROUND LAYERS
+//   permutation layers
 // =========================================================
 
 fn theta_diffusion(state: &[u64; WORDS]) -> [u64; WORDS] {
@@ -83,11 +74,12 @@ fn theta_diffusion(state: &[u64; WORDS]) -> [u64; WORDS] {
     let mut d = [0u64; 5];
 
     for x in 0..5 {
-        c[x] = state[x]
-            ^ state[x + 5]
-            ^ state[x + 10]
-            ^ state[x + 15]
-            ^ state[x + 20];
+        c[x] =
+            state[x] ^
+            state[x + 5] ^
+            state[x + 10] ^
+            state[x + 15] ^
+            state[x + 20];
     }
 
     for x in 0..5 {
@@ -101,14 +93,9 @@ fn theta_diffusion(state: &[u64; WORDS]) -> [u64; WORDS] {
         }
     }
 
-    for v in &mut out {
-        *v &= MASK;
-    }
-
     out
 }
 
-// Lane rotations
 const ROT: [u32; WORDS] = [
      0,  1, 62, 28, 27,
     36, 44,  6, 55, 20,
@@ -142,10 +129,6 @@ fn chi_non_linearity(state: &[u64; WORDS]) -> [u64; WORDS] {
         out[i + 4] ^= (!a) & b;
     }
 
-    for v in &mut out {
-        *v &= MASK;
-    }
-
     out
 }
 
@@ -154,31 +137,30 @@ fn add_round_constant(state: &mut [u64; WORDS], rc: u64) {
 }
 
 // =========================================================
-//   ROUND FUNCTION
+//   round function
 // =========================================================
 
-fn round_function(state: &[u64; WORDS], r: usize) -> [u64; WORDS] {
-    let mut s = theta_diffusion(state);
-    s = bit_permutation(&s);
-    s = chi_non_linearity(&s);
-    add_round_constant(&mut s, ROUND_CONSTANTS[r % RC_COUNT]);
-    s
+fn round_function(state: &[u64; WORDS], r: usize, rc: &[u64; RC_COUNT]) -> [u64; WORDS] {
+    let s1 = theta_diffusion(state);
+    let s2 = bit_permutation(&s1);
+    let mut s3 = chi_non_linearity(&s2);
+    add_round_constant(&mut s3, rc[r % RC_COUNT]);
+    s3
 }
 
-
 // =========================================================
-//   SQUEEZE
+//   squeeze
 // =========================================================
 
-fn squeeze(mut state: [u64; WORDS], out_bytes: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(out_bytes);
+fn squeeze(mut state: [u64; WORDS], out_bytes: usize, rc: &[u64; RC_COUNT]) -> Vec<u8> {
+    let mut out = Vec::new();
     let mut r = 0usize;
 
     while out.len() < out_bytes {
         for &w in &state[..RATE_WORDS] {
             out.extend_from_slice(&w.to_le_bytes());
         }
-        state = round_function(&state, r);
+        state = round_function(&state, r, rc);
         r += 1;
     }
 
@@ -187,10 +169,11 @@ fn squeeze(mut state: [u64; WORDS], out_bytes: usize) -> Vec<u8> {
 }
 
 // =========================================================
-//   TOP-LEVEL HASH
+//   top-level hash
 // =========================================================
 
 pub fn turb1600_hash(message: &[u8]) -> Vec<u8> {
+    let rc = gen_round_constants();
     let mut state = initialize_state();
 
     let padlen = (RATE_BYTES - (message.len() + 2) % RATE_BYTES) % RATE_BYTES;
@@ -204,15 +187,15 @@ pub fn turb1600_hash(message: &[u8]) -> Vec<u8> {
     for block in padded.chunks(RATE_BYTES) {
         absorb_block(&mut state, block);
         for _ in 0..ROUNDS {
-            state = round_function(&state, r);
+            state = round_function(&state, r, &rc);
             r += 1;
         }
     }
 
     for _ in 0..FINAL_ROUNDS {
-        state = round_function(&state, r);
+        state = round_function(&state, r, &rc);
         r += 1;
     }
 
-    squeeze(state, OUTPUT_BYTES)
+    squeeze(state, OUTPUT_BYTES, &rc)
 }
