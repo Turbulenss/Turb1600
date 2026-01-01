@@ -1,31 +1,49 @@
 # turb1600
 
-`turb1600` is an experimental sponge-based cryptographic hash function with a
-1600-bit internal state and a 1024-bit output.
+`turb1600` is an **experimental sponge-based cryptographic hash function** with a  
+**1600-bit internal state** and a **1024-bit output**.
 
-This repository currently provides:
-- A **reference implementation in Rust**
-- **Bit-for-bit compatibility** with the Python reference implementation
-
-⚠️ **Project status:**  
+⚠️ **Status: Experimental**  
 This project is under active development. The algorithm, parameters, and public
-interfaces may change. Do **not** use this implementation for production or
-security-critical purposes at this stage.
+interfaces may change. **Do not use in production or security-critical systems.**
 
 ---
 
-## Overview
+## Features
 
-`turb1600` follows a sponge construction inspired by Keccak-style permutations,
-using:
-- 1600-bit internal state
-- 1088-bit rate
-- 512-bit capacity
-- 64-bit lanes
-- Strong θ-style diffusion and nonlinear mixing
+- 1600-bit internal state (25 × 64-bit lanes)
+- Sponge construction (1088-bit rate, 512-bit capacity)
+- Deterministic and reproducible
+- Reference-first design
+- Bit-for-bit compatible with Python reference
 
-The design prioritizes clarity and determinism for experimentation and analysis.
 
 ---
 
-Full documentation for `turb1600` comming soon
+## Python Installation (via maturin)
+
+### Requirements
+- Rust (stable)
+- Python 3.9+
+- `maturin`
+
+Install maturin:
+```bash
+pip install maturin
+cd rust
+maturin develop --release
+```
+
+or Build a wheel:
+
+```bash
+maturin build --release
+pip install target/wheels/turb1600*.whl
+```
+
+# Python Usage
+```bash
+import turb1600
+digest = turb1600.hash(b"hello world")
+```
+
