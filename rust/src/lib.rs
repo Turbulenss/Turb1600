@@ -1,24 +1,14 @@
-// =========================================================
-//   turb1600 — Python bindings (pyo3)
-// =========================================================
-
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 mod core;
 
-/// Compute the turb1600 hash of the given message.
-///
-/// Args:
-///     data (bytes): Input message
-///
-/// Returns:
-///     bytes: 1024-bit (128-byte) hash output
 #[pyfunction]
-fn hash(data: &[u8]) -> PyResult<Vec<u8>> {
-    Ok(core::turb1600_hash(data))
+fn hash(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyBytes>> {
+    let digest = core::turb1600_hash(data);
+    Ok(PyBytes::new(py, &digest).into())
 }
 
-/// Python module definition
 #[pymodule]
 fn turb1600(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hash, m)?)?;
