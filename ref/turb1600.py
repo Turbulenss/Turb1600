@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 # =========================================================
-#   turb1600 (REFERENCE IMPLEMENTATION)
+#   turb1600 — Python Reference (v0.2.0 compatible)
 # =========================================================
 
 from typing import List
 
 # =========================================================
-#   SPONGE PARAMETERS
+# Parameters
 # =========================================================
 
-WORD_BITS = 64
-MASK = (1 << 64) - 1
-
-WORDS = 25                  # 1600-bit state
-RATE_BYTES = 136            # 1088-bit rate
+STATE_WORDS = 25
+RATE_BYTES = 136
 RATE_WORDS = RATE_BYTES // 8
 
-ROUNDS = 16
+FULL_ROUNDS = 32
 FINAL_ROUNDS = 4
-OUTPUT_BYTES = 128          # 1024-bit output
+OUTPUT_BYTES = 128
 
-_SEED_STRING = (
-    b"turb1600 | sponge-hash | state=1600 | rate=1088 | "
-    b"capacity=512 | output=1024 | v1"
+DOMAIN_TAG = (
+    b"turb1600:v2|state=1600|rate=1088|capacity=512|out=1024"
 )
 
+MASK = (1 << 64) - 1
+
 # =========================================================
-#   U64 HELPERS
+# Helpers
 # =========================================================
 
 def u64(x: int) -> int:
@@ -35,70 +33,31 @@ def u64(x: int) -> int:
 def rol(x: int, r: int) -> int:
     return u64((x << r) | (x >> (64 - r)))
 
-# =========================================================
-#   ROUND CONSTANTS
-# =========================================================
-
-_RC_COUNT = 1024
-
-def _gen_round_constants(n: int) -> List[int]:
-    rc = []
-    x = 0x9E3779B97F4A7C15
-    for _ in range(n):
-        x ^= (x << 7) & MASK
-        x ^= (x >> 9)
-        x ^= (x << 8) & MASK
-        rc.append(x & MASK)
-    return rc
-
-ROUND_CONSTANTS = _gen_round_constants(_RC_COUNT)
+def rot(round_: int, base: int) -> int:
+    return (base + ((round_ * 13) & 63)) & 63
 
 # =========================================================
-#   STATE INITIALIZATION
+# Round constant (matches Rust exactly)
 # =========================================================
 
-def initialize_state() -> List[int]:
-    state = [0] * WORDS
-    for i, b in enumerate(_SEED_STRING):
-        state[i % WORDS] ^= u64(b + i)
-    return state
+def round_constant(r: int) -> int:
+    x = (
+        r
+        ^ 0x243F6A8885A308D3
+        ^ rol(r, 17)
+    )
+    x ^= x >> 30
+    x = u64(x * 0xBF58476D1CE4E5B9)
+    x ^= x >> 27
+    x = u64(x * 0x94D049BB133111EB)
+    x ^= x >> 31
+    return u64(x)
 
 # =========================================================
-#   ABSORB
+# Permutation tables
 # =========================================================
 
-def absorb_block(state: List[int], block: bytes) -> None:
-    for i in range(0, len(block), 8):
-        state[i // 8] ^= u64(int.from_bytes(block[i:i+8], "little"))
-
-# =========================================================
-#   ROUND LAYERS
-# =========================================================
-
-def theta_diffusion(state: List[int]) -> List[int]:
-    C = [0] * 5
-    D = [0] * 5
-
-    for x in range(5):
-        C[x] = (
-            state[x] ^
-            state[x + 5] ^
-            state[x + 10] ^
-            state[x + 15] ^
-            state[x + 20]
-        )
-
-    for x in range(5):
-        D[x] = C[(x - 1) % 5] ^ rol(C[(x + 1) % 5], 1)
-
-    out = state.copy()
-    for x in range(5):
-        for y in range(5):
-            out[x + 5*y] ^= D[x]
-
-    return [u64(x) for x in out]
-
-_ROT = [
+RHO = [
      0,  1, 62, 28, 27,
     36, 44,  6, 55, 20,
      3, 10, 43, 25, 39,
@@ -106,85 +65,167 @@ _ROT = [
     18,  2, 61, 56, 14,
 ]
 
-def bit_permutation(state: List[int]) -> List[int]:
-    out = [0] * WORDS
-    for i in range(WORDS):
-        out[(i * 7) % WORDS] = rol(state[i], _ROT[i])
-    return out
-
-def chi_non_linearity(state: List[int]) -> List[int]:
-    out = state.copy()
-    for i in range(0, WORDS, 5):
-        a, b, c, d, e = state[i:i+5]
-        out[i+0] ^= (~b) & c
-        out[i+1] ^= (~c) & d
-        out[i+2] ^= (~d) & e
-        out[i+3] ^= (~e) & a
-        out[i+4] ^= (~a) & b
-    return [u64(x) for x in out]
-
-def add_round_constant(state: List[int], rc: int) -> None:
-    state[0] ^= rc
+PI = [
+     0,  7, 14, 21,  3,
+    10, 17, 24,  6, 13,
+    20,  2,  9, 16, 23,
+     5, 12, 19,  1,  8,
+    15, 22,  4, 11, 18,
+]
 
 # =========================================================
-#   ROUND FUNCTION
+# Core operations
 # =========================================================
 
-def round_function(state: List[int], r: int) -> List[int]:
-    state = theta_diffusion(state)
-    state = bit_permutation(state)
-    state = chi_non_linearity(state)
-    add_round_constant(state, ROUND_CONSTANTS[r])
+def absorb_block(state: List[int], block: bytes) -> None:
+    for i in range(RATE_WORDS):
+        state[i] ^= int.from_bytes(block[i*8:(i+1)*8], "little")
+
+def permute(state: List[int], tmp: List[int], r: int) -> None:
+    # ---- theta ----
+    c = [0]*5
+    for x in range(5):
+        c[x] = (
+            state[x] ^
+            state[x+5] ^
+            state[x+10] ^
+            state[x+15] ^
+            state[x+20]
+        )
+
+    d = [
+        c[4] ^ rol(c[1], 1),
+        c[0] ^ rol(c[2], 1),
+        c[1] ^ rol(c[3], 1),
+        c[2] ^ rol(c[4], 1),
+        c[3] ^ rol(c[0], 1),
+    ]
+
+    for y in range(5):
+        for x in range(5):
+            state[x + 5*y] ^= d[x]
+
+    # ---- rho + pi ----
+    for i in range(25):
+        tmp[PI[i]] = rol(state[i], rot(r, RHO[i]))
+
+    state[:] = tmp[:]
+
+    # ---- chi ----
+    for i in range(0, 25, 5):
+        a, b, c, d_, e = state[i:i+5]
+        state[i+0] ^= (~b) & c
+        state[i+1] ^= (~c) & d_
+        state[i+2] ^= (~d_) & e
+        state[i+3] ^= (~e) & a
+        state[i+4] ^= (~a) & b
+
+    # ---- iota ----
+    state[(r * 7) % STATE_WORDS] ^= round_constant(r)
+
+    for i in range(25):
+        state[i] &= MASK
+
+# =========================================================
+# Initialization
+# =========================================================
+
+def initialize_state() -> List[int]:
+    state = [0]*STATE_WORDS
+    block = bytearray(RATE_BYTES)
+
+    n = min(len(DOMAIN_TAG), RATE_BYTES)
+    block[:n] = DOMAIN_TAG[:n]
+    block[n] = 0x01
+    block[-1] |= 0x80
+
+    absorb_block(state, block)
+
+    tmp = [0]*STATE_WORDS
+    for r in range(8):
+        permute(state, tmp, r)
+
     return state
 
 # =========================================================
-#   SQUEEZE
-# =========================================================
-
-def squeeze(state: List[int], out_bytes: int) -> bytes:
-    out = bytearray()
-    r = 0
-    while len(out) < out_bytes:
-        for w in state[:RATE_WORDS]:
-            out.extend(w.to_bytes(8, "little"))
-        state = round_function(state, r)
-        r += 1
-    return bytes(out[:out_bytes])
-
-# =========================================================
-#   TOP-LEVEL HASH
+# Public hash
 # =========================================================
 
 def turb1600_hash(message: bytes) -> bytes:
     state = initialize_state()
+    tmp = [0]*STATE_WORDS
+    round_ = 0
 
-    padlen = (-len(message) - 2) % RATE_BYTES
-    padded = message + b'\x01' + b'\x00' * padlen + b'\x80'
+    # ---- absorb ----
+    offset = 0
+    while offset + RATE_BYTES <= len(message):
+        absorb_block(state, message[offset:offset+RATE_BYTES])
+        for _ in range(FULL_ROUNDS):
+            permute(state, tmp, round_)
+            round_ += 1
+        offset += RATE_BYTES
 
-    r = 0
-    for i in range(0, len(padded), RATE_BYTES):
-        absorb_block(state, padded[i:i + RATE_BYTES])
-        for _ in range(ROUNDS):
-            state = round_function(state, r)
-            r += 1
+    # ---- final block ----
+    last = bytearray(RATE_BYTES)
+    rem = len(message) - offset
+    last[:rem] = message[offset:]
+    last[rem] = 0x01
+    last[-1] |= 0x80
 
-    for _ in range(FINAL_ROUNDS):
-        state = round_function(state, r)
-        r += 1
+    absorb_block(state, last)
 
-    return squeeze(state, OUTPUT_BYTES)
+    for _ in range(FULL_ROUNDS + FINAL_ROUNDS):
+        permute(state, tmp, round_)
+        round_ += 1
+
+    # ---- squeeze ----
+    out = bytearray()
+    while len(out) < OUTPUT_BYTES:
+        state[24] ^= MASK
+
+        for i in range(RATE_WORDS):
+            if len(out) >= OUTPUT_BYTES:
+                break
+            out.extend(state[i].to_bytes(8, "little"))
+
+        permute(state, tmp, round_)
+        round_ += 1
+
+    return bytes(out[:OUTPUT_BYTES])
 
 # =========================================================
-#   SELF-TEST
+# Self-test
 # =========================================================
+KATS = [
+    b"",
+    b"a",
+    b"abc",
+    b"message digest",
+    b"abcdefghijklmnopqrstuvwxyz",
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+    b"\x00",
+    b"\x00" * 7,
+    b"\x00" * 8,
+    b"\x00" * 135,          # rate - 1
+    b"\x00" * 136,          # exact rate
+    b"\x00" * 137,          # rate + 1
+    b"turb1600",
+    bytes(range(256)),      # full byte spectrum
+]
 
-def run_selftest():
-    print("turb1600 reference self-test")
+def generate_kats():
+    print("turb1600 v0.2.0 KATs\n")
+    for i, msg in enumerate(KATS):
+        h = turb1600_hash(msg).hex()
+        label = f"KAT-{i:02d}"
+        print(f"{label}:")
+        print(f"  msg = {msg!r}")
+        print(f"  hash = {h}\n")
+
+if __name__ == "__main__":
     d1 = turb1600_hash(b"abc")
     d2 = turb1600_hash(b"abc")
     assert d1 == d2
     print("PASS")
     print(d1.hex())
-
-if __name__ == "__main__":
-    run_selftest()
+    generate_kats()
